@@ -36,20 +36,24 @@ export function dealParts(deal, plan) {
   return { share, split: !!split, atSign, atStart: r2(share - atSign) };
 }
 
-/** What one deal pays when it lands on top of `cum` YTD roll call. */
-export function evalDeal(deal, cum, plan, numbers) {
+/** What one deal pays when it lands on top of `cum` YTD band sales.
+ *  `bonusCum` is YTD bonus-eligible sales, used when the bonus steps up on those (stepOn: "bonus"). */
+export function evalDeal(deal, cum, plan, numbers, bonusCum = 0) {
   const ti = num(numbers.ti), quota = num(numbers.quota);
   const { share, split, atSign, atStart } = dealParts(deal, plan);
   const aBefore = attainment(cum, quota), aAfter = attainment(cum + atSign, quota);
   const bandPct = r2(points(aAfter, plan.tiers) - points(aBefore, plan.tiers));
   const bandPay = r2((ti * bandPct) / 100);
 
-  // New-logo bonus on the full share; the rate steps up once YTD roll call passes stepAt.
+  // New-logo bonus on the full share. The rate steps up once the measured YTD total passes stepAt:
+  // bonus-eligible sales when stepOn is "bonus", otherwise the sales that move the band.
   const b = plan.bonus || {};
+  const onBonus = b.stepOn === "bonus";
   let bonus = 0, stepFrac = 0;
   if (deal.newLogo && b.rate) {
     const step = b.stepAt == null ? Infinity : num(b.stepAt);
-    stepFrac = atSign > 0 ? Math.max(0, cum + atSign - Math.max(cum, step)) / atSign : (cum > step ? 1 : 0);
+    const base = onBonus ? num(bonusCum) : cum, inc = onBonus ? share : atSign;
+    stepFrac = inc > 0 ? Math.max(0, base + inc - Math.max(base, step)) / inc : (base > step ? 1 : 0);
     const hi = b.stepRate == null ? b.rate : num(b.stepRate);
     bonus = r2(share * (num(b.rate) * (1 - stepFrac) + hi * stepFrac));
   }
@@ -62,7 +66,7 @@ export function evalDeal(deal, cum, plan, numbers) {
     share, split, atSign, atStart, aBefore, aAfter, bandPct, bandPay, bonus, stepFrac, startPay, extras,
     commissions: r2(bonus + startPay + extrasPay),
     total: r2(bandPay + bonus + startPay + extrasPay),
-    cumAfter: cum + atSign, large,
+    cumAfter: cum + atSign, bonusCumAfter: num(bonusCum) + (deal.newLogo ? share : 0), large,
   };
 }
 
@@ -73,26 +77,56 @@ export function summarize(state) {
   const { plan, numbers } = state;
   const deals = (state.deals || []).filter((d) => !d.posted);
   const ytd = num(numbers.ytdRC);
-  let cum = ytd;
+  let cum = ytd, bcum = num(numbers.bonusYTD);
   const closed = deals.filter((d) => d.status !== "pipeline").sort(byPostMonth)
-    .map((d) => { const e = evalDeal(d, cum, plan, numbers); cum = e.cumAfter; return { d, e }; });
-  const cumClosed = cum;
+    .map((d) => { const e = evalDeal(d, cum, plan, numbers, bcum); cum = e.cumAfter; bcum = e.bonusCumAfter; return { d, e }; });
+  const cumClosed = cum, bonusClosed = bcum;
   const pipeline = deals.filter((d) => d.status === "pipeline")
-    .map((d) => ({ d, e: evalDeal(d, cumClosed, plan, numbers) }))
+    .map((d) => ({ d, e: evalDeal(d, cumClosed, plan, numbers, bonusClosed) }))
     .sort((x, y) => y.e.total - x.e.total);
-  let cumAll = cumClosed, pipelineAll = 0;
+  let cumAll = cumClosed, ball = bonusClosed, pipelineAll = 0;
   deals.filter((d) => d.status === "pipeline").sort(byPostMonth).forEach((d) => {
-    const e = evalDeal(d, cumAll, plan, numbers); cumAll = e.cumAfter; pipelineAll += e.total;
+    const e = evalDeal(d, cumAll, plan, numbers, ball); cumAll = e.cumAfter; ball = e.bonusCumAfter; pipelineAll += e.total;
   });
   const owed = Math.abs(num(numbers.owed));
   const closedTotal = r2(closed.reduce((s, x) => s + x.e.total, 0));
   const newLogos = closed.filter((x) => x.d.newLogo).length;
   return {
-    ytd, cumClosed, cumAll, closed, pipeline, owed, closedTotal,
+    ytd, cumClosed, cumAll, bonusClosed, closed, pipeline, owed, closedTotal,
     afterOwed: r2(Math.max(0, closedTotal - owed)),
     pipelineAll: r2(pipelineAll),
     logos: num(numbers.logos) + newLogos,
     posted: (state.deals || []).filter((d) => d.posted),
+  };
+}
+
+/** Target incentive for a quota, from the plan's quota-band table ({from, ti} rows). */
+export function tiForQuota(quota, plan) {
+  const rows = (plan.tiTable || []).slice().sort((a, b) => num(a.from) - num(b.from));
+  let hit = null;
+  rows.forEach((r) => { if (num(quota) >= num(r.from)) hit = r; });
+  if (!hit) return null;
+  const i = rows.indexOf(hit), next = rows[i + 1];
+  return { ti: num(hit.ti), from: num(hit.from), to: next ? num(next.from) - 1 : null };
+}
+
+/** Fast Start: where you stand against the period that's still open. */
+export function fastStart(state, s) {
+  const fs = state.plan.fastStart; if (!fs || !fs.h1) return null;
+  const n = state.numbers, q1Earned = !!n.fsQ1Earned;
+  const amount = num(q1Earned ? fs.h1.amountWithQ1 : fs.h1.amountWithoutQ1);
+  const quota = num(n.fsH1Quota), end = String(fs.h1.end || "");
+  const postsBy = (d) => String(d.month || "") <= end;
+  let byEnd = num(n.ytdRC);
+  s.closed.forEach(({ d, e }) => { if (postsBy(d)) byEnd += e.atSign; });
+  let withPipe = byEnd;
+  s.pipeline.forEach(({ d, e }) => { if (postsBy(d)) withPipe += e.atSign; });
+  return {
+    label: fs.label || "Fast Start bonus", period: fs.h1.label || "1H", endLabel: fs.h1.endLabel || end,
+    q1Label: (fs.q1 && fs.q1.label) || "Q1", q1Amount: num(fs.q1 && fs.q1.amount), q1Earned,
+    amount, quota, byEnd: r2(byEnd), withPipe: r2(withPipe),
+    need: r2(Math.max(0, quota - byEnd)), needWithPipe: r2(Math.max(0, quota - withPipe)),
+    met: quota > 0 && byEnd >= quota, metWithPipe: quota > 0 && withPipe >= quota, note: fs.note || "",
   };
 }
 
@@ -123,6 +157,7 @@ export function decodeSetup(text) {
     plan: obj.plan,
     numbers: obj.numbers || {},
     deals: Array.isArray(obj.deals) ? obj.deals : [],
+    mode: obj.mode === "update" ? "update" : "full",
     updatedAt: Date.now(),
   };
 }

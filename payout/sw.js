@@ -1,6 +1,6 @@
 // Offline support: serve the app shell from cache, refresh it in the background.
 // Bump VERSION on every deploy so phones pick up the new files.
-const VERSION = "payout-v1";
+const VERSION = "payout-v2";
 const SHELL = [
   "./", "./index.html", "./app.js", "./engine.js", "./sync.js", "./firebase-config.js",
   "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png",

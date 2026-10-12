@@ -188,6 +188,15 @@ th{color:var(--muted);font-weight:600;font-size:.72rem;text-transform:uppercase;
 .n{text-align:right;font-variant-numeric:tabular-nums}
 .notes{margin:0;padding-left:18px;display:grid;gap:6px;color:var(--muted);font-size:.88rem}
 
+/* fast start */
+.meter{position:relative;height:12px;border-radius:99px;background:var(--sunk);overflow:hidden}
+.meter i{position:absolute;left:0;top:0;bottom:0;border-radius:99px;background:var(--accent)}
+.meter i.pipe{background:var(--b1)}
+.fs-msg{font-size:.94rem}
+.fs-msg.ok{color:var(--good);font-weight:600}
+tr.mine td{font-weight:700;background:var(--accent-soft)}
+.fields .toggle.full{grid-column:1/-1}
+
 /* sheet */
 .sheet{position:fixed;inset:0;z-index:20;background:var(--scrim);display:flex;align-items:flex-end;justify-content:center}
 .sheet[hidden]{display:none}

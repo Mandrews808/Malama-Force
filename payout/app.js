@@ -1,7 +1,7 @@
 import CONFIG from "./firebase-config.js";
 import {
   r2, attainment, points, tierRate, evalDeal, dealParts, summarize,
-  encodeSetup, decodeSetup, parseMoney,
+  encodeSetup, decodeSetup, parseMoney, tiForQuota, fastStart,
 } from "./engine.js";
 
 const LS_KEY = "payout-state-v1";
@@ -44,6 +44,7 @@ function L() {
     split: (p.split && p.split.label) || "Split deal",
     startPay: (p.split && p.split.startLabel) || "Paid at start",
     rc: l.rc || "roll call",
+    bonusSales: l.bonusSales || "bonus-eligible sales",
   };
 }
 const fmtRate = (x) => `${r2(x * 100)}%`;
@@ -164,7 +165,7 @@ function renderPayout() {
       <button class="btn small danger" data-act="delete" data-id="${esc(d.id)}">${ui.armed === "del:" + d.id ? "Tap again" : "Delete"}</button></span></div>`).join("")}
   </details>` : "";
 
-  return hero + bandCard(s, n) + closed + pipe + posted;
+  return hero + bandCard(s, n) + fastStartCard(s) + closed + pipe + posted;
 }
 
 function lineItems(e) {
@@ -197,6 +198,24 @@ function dealCard(d, e) {
     ${e.large ? `<p class="flag">Over the ${money(state.plan.largeDeal)} large deal threshold. Commission is advanced on the first ${money(state.plan.largeDeal)} and the rest pays when the client starts.</p>` : ""}
     <div class="deal-foot"><button class="btn small" data-act="post" data-id="${esc(d.id)}">It posted to my ${esc(lb.rc)}</button></div>
   </article>`;
+}
+
+function fastStartCard(s) {
+  const f = fastStart(state, s); if (!f) return "";
+  const head = `<div class="card-head"><h2>${esc(f.label)} · ${esc(f.period)}</h2><span class="muted">${money(f.amount)} at stake</span></div>`;
+  if (!f.quota) return `<section class="card">${head}
+    <p class="note">Add your ${esc(f.period)} sales quota on the Numbers tab (your YTD sales quota at the end of ${esc(f.endLabel)}) to track this bonus.</p></section>`;
+  const w = Math.min(100, f.byEnd / f.quota * 100), wp = Math.min(100, f.withPipe / f.quota * 100);
+  const msg = f.met
+    ? `On track for ${money(f.amount)}: your closed deals get you to ${money(f.byEnd)} of ${money(f.quota)} by the end of ${esc(f.endLabel)}.`
+    : `You need ${money(f.need)} more sales by the end of ${esc(f.endLabel)} to earn ${money(f.amount)}.`;
+  const pipeMsg = !f.met && f.withPipe > f.byEnd
+    ? (f.metWithPipe ? ` Pipeline deals set to post by then would cover it.` : ` Pipeline deals set to post by then would leave ${money(f.needWithPipe)} to go.`) : "";
+  return `<section class="card">${head}
+    <div class="meter" aria-hidden="true"><i class="pipe" style="width:${wp.toFixed(2)}%"></i><i style="width:${w.toFixed(2)}%"></i></div>
+    <p class="fs-msg${f.met ? " ok" : ""}">${msg}${pipeMsg}</p>
+    <p class="hint">${f.q1Earned ? `${esc(f.q1Label)} bonus of ${money(f.q1Amount)} earned.` : `${esc(f.q1Label)} bonus not earned.`} Change that on the Numbers tab.${f.note ? " " + esc(f.note) : ""}</p>
+  </section>`;
 }
 
 function bandCard(s, n) {
@@ -233,26 +252,37 @@ function bandCard(s, n) {
       <div><dt>${esc(lb.target)} earned</dt><dd>${aClosed !== aNow ? pct(pNow) + " → " : ""}${tiStr(pClosed)}</dd></div>
       <div><dt>Next $10K of ${esc(lb.rc)} adds</dt><dd>${pct(per10)} of ${esc(lb.target)}${ti ? " · " + money(ti * per10 / 100) : ""}</dd></div>
       ${next != null ? `<div><dt>${fmtX(nextRate)} starts at ${next}%</dt><dd>${money(next / 100 * q - s.cumClosed)} more</dd></div>` : `<div><dt>Rate</dt><dd>Top band</dd></div>`}
-      ${b.rate && b.stepAt != null ? `<div><dt>${esc(lb.bonus)} rate</dt><dd>${s.cumClosed >= b.stepAt ? fmtRate(b.stepRate) : `${fmtRate(b.rate)} · ${fmtRate(b.stepRate)} after ${money(b.stepAt - s.cumClosed)} more`}</dd></div>` : ""}
+      ${b.rate && b.stepAt != null ? (() => { const base = b.stepOn === "bonus" ? s.bonusClosed : s.cumClosed;
+        return `<div><dt>${esc(lb.bonus)} rate</dt><dd>${base >= b.stepAt ? fmtRate(b.stepRate) : `${fmtRate(b.rate)} · ${fmtRate(b.stepRate)} after ${money(b.stepAt - base)} more${b.stepOn === "bonus" ? ` ${esc(lb.bonusSales)}` : ""}`}</dd></div>`; })() : ""}
       ${Number(n.logoTarget) || Number(n.logos) ? `<div><dt>Logos</dt><dd>${s.logos !== (Number(n.logos) || 0) ? (Number(n.logos) || 0) + " → " : ""}${s.logos}${Number(n.logoTarget) ? " of " + Number(n.logoTarget) : ""}</dd></div>` : ""}
     </dl>
   </section>`;
 }
 
 // ---------------------------------------------------------------- render: numbers tab
-const NUM_FIELDS = [
-  ["quota", "Annual quota", "money", "Annual Sales Quota in the Earnings Estimator."],
-  ["ti", "TI @ 100%", "money", "Annual Sales TI @ 100% in the Earnings Estimator."],
-  ["ytdRC", "YTD roll call", "money", "Year To Date on your Rollcall dashboard."],
+const BASE_FIELDS = [
+  ["quota", "Annual quota", "money", "Your annual sales quota."],
+  ["ti", "Target incentive @ 100%", "money", "What you earn at 100% of quota."],
+  ["ytdRC", "YTD sales", "money", "Year-to-date sales that count toward your quota."],
+  ["bonusYTD", "YTD bonus-eligible sales", "money", "Sales that already earned the new-logo bonus this year."],
   ["owed", "Owed back before next check", "money", "YTD payments minus YTD earnings, from a no-start or audit."],
+  ["fsH1Quota", "Fast Start sales quota", "money", "Your YTD sales quota at the end of the Fast Start period."],
+  ["fsQ1Earned", "Earned the first Fast Start bonus", "bool", ""],
   ["logos", "Logos so far", "int", ""],
   ["logoTarget", "Logo target", "int", ""],
   ["asOf", "Numbers as of", "text", "So you know when you last updated them."],
 ];
+function numFields() {
+  const p = state.plan, over = p.fields || {};
+  return BASE_FIELDS.filter(([k]) => (k !== "bonusYTD" || (p.bonus && p.bonus.stepOn === "bonus")) && ((k !== "fsH1Quota" && k !== "fsQ1Earned") || p.fastStart))
+    .map(([k, label, type, hint]) => [k, (over[k] && over[k].label) || label, type, (over[k] && over[k].hint) || hint]);
+}
 
 function renderNumbers() {
   const n = state.numbers, p = state.plan, lb = L();
   const field = ([k, label, type, hint]) => {
+    if (type === "bool") return `<label class="toggle full"><input type="checkbox" id="n-${k}" data-num="${k}" data-type="bool"${n[k] ? " checked" : ""}><span><b>${esc(label)}</b>${hint ? `<small>${esc(hint)}</small>` : ""}</span></label>`;
+    if (k === "ti" && p.tiTable) { const band = tiForQuota(n.quota, p); if (band) hint = `Your ${money(band.from)}${band.to ? "–" + money(band.to) : "+"} quota band sets this at ${money(band.ti)}. It updates when you change your quota.`; }
     const v = type === "money" ? inputMoney(n[k]) : type === "int" ? (Number(n[k]) ? String(Number(n[k])) : "") : (n[k] || "");
     return `<div class="field${type === "text" ? " full" : ""}"><label for="n-${k}">${esc(label)}</label>
       <div class="${type === "money" ? "money" : ""}"><input id="n-${k}" data-num="${k}" data-type="${type}" type="text" inputmode="${type === "text" ? "text" : type === "int" ? "numeric" : "decimal"}" autocomplete="off" value="${esc(v)}"></div>
@@ -266,12 +296,14 @@ function renderNumbers() {
   return `<section class="card">
       <h2>Your numbers</h2>
       <p class="note">Update these from Rollcall and the Earnings Estimator each week. Changes save when you leave a field.</p>
-      <div class="fields">${NUM_FIELDS.map(field).join("")}</div>
+      <div class="fields">${numFields().map(field).join("")}</div>
     </section>
     ${syncCard()}
     <section class="card">
       <h2>${esc(p.name || "Your plan")}</h2>
+      ${p.updated ? `<p class="hint">${esc(p.updated)}</p>` : ""}
       <div class="tw"><table><thead><tr><th>${esc(lb.band)} attainment</th><th class="n">Rate</th><th class="n">${esc(lb.target)} at top</th></tr></thead><tbody>${tierRows}</tbody></table></div>
+      ${(p.tiTable || []).length ? `<div class="tw"><table><thead><tr><th>Quota band</th><th class="n">${esc(lb.target)} @ 100%</th></tr></thead><tbody>${p.tiTable.map((r, i, a) => `<tr${tiForQuota(n.quota, p) && tiForQuota(n.quota, p).from === r.from ? ' class="mine"' : ""}><td>${money(r.from)}${a[i + 1] ? " – " + money(a[i + 1].from - 1) : "+"}</td><td class="n">${money(r.ti)}</td></tr>`).join("")}</tbody></table></div>` : ""}
       ${(p.notes || []).length ? `<ul class="notes">${p.notes.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
     </section>
     <section class="card">
@@ -282,7 +314,7 @@ function renderNumbers() {
         <label class="sr" for="setupCode">Setup code</label>
         <textarea id="setupCode" rows="4" placeholder="PAYOUT1.…" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
         <p class="err" id="setupErr" role="alert"></p>
-        <button class="btn danger wide" data-act="replace-setup">${ui.armed === "replace" ? "Tap again to replace everything" : "Replace everything with this code"}</button>
+        <button class="btn ${ui.armed === "replace" ? "danger " : ""}wide" data-act="replace-setup">${ui.armed === "replace" ? "Tap again to replace your numbers and deals" : "Load code"}</button>
       </div>
       <textarea id="copyArea" class="sr" aria-hidden="true" tabindex="-1" readonly></textarea>
     </section>`;
@@ -363,9 +395,9 @@ function renderPreview() {
   if (!d.rc) { box.innerHTML = `<p class="muted">Enter your roll call to see what this deal pays.</p>`; return; }
   // Land it where it would really sit: after every other closed deal.
   const others = (state.deals || []).filter((x) => !x.posted && x.status !== "pipeline" && x.id !== d.id);
-  let cum = Number(state.numbers.ytdRC) || 0;
-  others.forEach((x) => { cum += dealParts(x, state.plan).atSign; });
-  const e = evalDeal(d, cum, state.plan, state.numbers);
+  let cum = Number(state.numbers.ytdRC) || 0, bcum = Number(state.numbers.bonusYTD) || 0;
+  others.forEach((x) => { const pt = dealParts(x, state.plan); cum += pt.atSign; if (x.newLogo) bcum += pt.share; });
+  const e = evalDeal(d, cum, state.plan, state.numbers, bcum);
   box.innerHTML = `<div class="pv-head"><span>${d.status === "pipeline" ? "If it closes, it pays" : "This deal pays"}</span><b>${money(e.total)}</b></div><ul class="lines">${lineItems(e)}</ul>`;
 }
 
@@ -392,6 +424,7 @@ function postDeal(id) {
     x.posted = true;
     s.numbers.ytdRC = r2((Number(s.numbers.ytdRC) || 0) + add);
     if (x.newLogo) s.numbers.logos = (Number(s.numbers.logos) || 0) + 1;
+    if (x.newLogo && s.plan.bonus && s.plan.bonus.stepOn === "bonus") s.numbers.bonusYTD = r2((Number(s.numbers.bonusYTD) || 0) + dealParts(x, s.plan).share);
   });
   toast(`Moved to Posted. YTD ${L().rc} is now ${money(state.numbers.ytdRC)}.`, () => { state = before; commit(() => {}); });
 }
@@ -409,6 +442,17 @@ function loadSetup(text, replace) {
   const err = $("#setupErr");
   try {
     const next = decodeSetup(text);
+    const mode = next.mode; delete next.mode;
+    if (mode === "update" && state) {
+      // Plan update: new rules, keep this device's numbers and deals, fill only numbers it doesn't have yet.
+      commit((s) => {
+        s.plan = next.plan;
+        Object.keys(next.numbers).forEach((k) => { if (s.numbers[k] == null || s.numbers[k] === "") s.numbers[k] = next.numbers[k]; });
+      }, { quiet: true });
+      ui.tab = "numbers"; ui.armed = null; render();
+      toast("Plan updated. Your numbers and deals are unchanged.");
+      return;
+    }
     state = next; saveLocal();
     if (ui.sync && ui.user) ui.sync.pushNow(state);
     ui.tab = "payout"; ui.armed = null;
@@ -459,10 +503,15 @@ document.addEventListener("click", async (ev) => {
       break;
     case "load-setup": loadSetup($("#setupCode").value, false); break;
     case "show-load": $("#loadBox").hidden = false; $("#setupCode").focus(); break;
-    case "replace-setup":
-      if (ui.armed === "replace") loadSetup($("#setupCode").value, true);
-      else { const v = $("#setupCode").value; try { decodeSetup(v); arm("replace"); render(); $("#loadBox").hidden = false; $("#setupCode").value = v; } catch (e) { $("#setupErr").textContent = e.message; } }
+    case "replace-setup": {
+      const v = $("#setupCode").value;
+      if (ui.armed === "replace") { loadSetup(v, true); break; }
+      try {
+        if (decodeSetup(v).mode === "update") { loadSetup(v, true); break; }
+        arm("replace"); render(); $("#loadBox").hidden = false; $("#setupCode").value = v;
+      } catch (e) { $("#setupErr").textContent = e.message; }
       break;
+    }
     case "copy-setup": copySetup(); break;
     case "undo": if (toast.undo) { const u = toast.undo; toast.undo = null; $("#toast").classList.remove("show"); u(); } break;
     case "sign-up": doAuth("signUp"); break;
@@ -489,10 +538,18 @@ document.addEventListener("change", (ev) => {
   if (t.closest("#sheet")) { renderPreview(); return; }
   if (t.dataset.num) {
     const k = t.dataset.num, type = t.dataset.type;
-    const v = type === "money" ? Math.abs(parseMoney(t.value)) : type === "int" ? Math.max(0, parseInt(t.value.replace(/[^\d]/g, ""), 10) || 0) : t.value.trim();
+    const v = type === "bool" ? t.checked : type === "money" ? Math.abs(parseMoney(t.value)) : type === "int" ? Math.max(0, parseInt(t.value.replace(/[^\d]/g, ""), 10) || 0) : t.value.trim();
     if (state.numbers[k] === v) return;
-    commit((s) => { s.numbers[k] = v; }, { quiet: true });
+    let tiMsg = "";
+    commit((s) => {
+      s.numbers[k] = v;
+      if (k === "quota" && s.plan.tiTable) {
+        const band = tiForQuota(v, s.plan);
+        if (band && band.ti !== Number(s.numbers.ti)) { s.numbers.ti = band.ti; tiMsg = `Saved. TI set to ${money(band.ti)} for your quota band.`; }
+      }
+    }, { quiet: true });
     renderHeader();
+    if (tiMsg || k === "quota") { render(); toast(tiMsg || "Saved"); return; }
     if (type === "money") t.value = inputMoney(v);
     toast("Saved");
   }
